@@ -1,0 +1,1 @@
+'api-key' => \App\Http\Middleware\ValidateApiKey::class,
