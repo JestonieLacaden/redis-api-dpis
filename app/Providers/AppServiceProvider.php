@@ -24,5 +24,9 @@ class AppServiceProvider extends ServiceProvider
         RateLimiter::for('cache-api', function ($request) {
             return Limit::perMinute(60)->by($request->ip());
         });
+
+        RateLimiter::for('pdf-api', function ($request) {
+        return Limit::perMinute(20)->by($request->ip());
+    });
     }
 }
