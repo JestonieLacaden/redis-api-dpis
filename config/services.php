@@ -18,6 +18,12 @@ return [
         'key' => env('GOTENBERG_API_KEY'),
     ],
 
+
+    'gotenberg' => [
+        'url' => env('GOTENBERG_URL', 'http://gotenberg:3000'),
+        'key' => env('GOTENBERG_API_KEY'),
+    ],
+
     'postmark' => [
         'key' => env('POSTMARK_API_KEY'),
     ],
