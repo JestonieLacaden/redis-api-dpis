@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\Response;
@@ -11,74 +12,93 @@ class PdfProxyController extends Controller
 {
     public function libreofficeConvert(Request $request): Response
     {
-        return $this->proxyMultipartRequest($request, '/forms/libreoffice/convert');
+        return $this->forwardMultipart($request, '/forms/libreoffice/convert');
     }
 
     public function chromiumConvertHtml(Request $request): Response
     {
-        return $this->proxyMultipartRequest($request, '/forms/chromium/convert/html');
+        return $this->forwardMultipart($request, '/forms/chromium/convert/html');
     }
 
     public function chromiumConvertUrl(Request $request): Response
     {
-        return $this->proxyMultipartRequest($request, '/forms/chromium/convert/url');
+        return $this->forwardMultipart($request, '/forms/chromium/convert/url');
     }
 
-    protected function proxyMultipartRequest(Request $request, string $endpoint): Response
+    protected function forwardMultipart(Request $request, string $endpoint): Response
     {
         $baseUrl = rtrim((string) config('services.gotenberg.url'), '/');
         $targetUrl = $baseUrl . $endpoint;
-        $contentType = (string) $request->header('Content-Type', '');
-        $body = $request->getContent();
 
-        if ($contentType === '' || $body === '') {
+        if (!$request->hasFile('files') && !$request->filled('url')) {
             return response()->json([
                 'success' => false,
-                'message' => 'Invalid multipart request body.',
+                'message' => 'Missing required multipart fields.',
                 'data' => null,
             ], 422);
         }
 
         try {
-            $headers = [
-                'Content-Type' => $contentType,
-                'Accept' => 'application/pdf',
-            ];
+            $client = Http::timeout(180)->accept('application/pdf');
 
             $internalApiKey = config('services.gotenberg.key');
             if (!empty($internalApiKey)) {
-                $headers['X-Api-Key'] = $internalApiKey;
+                $client = $client->withHeaders([
+                    'X-Api-Key' => $internalApiKey,
+                ]);
             }
 
-            $upstream = Http::withHeaders($headers)
-                ->withBody($body, $contentType)
-                ->timeout(180)
-                ->send('POST', $targetUrl);
+            $files = $request->file('files');
+            if ($files instanceof UploadedFile) {
+                $files = [$files];
+            }
 
-            $responseHeaders = [
+            if (is_array($files)) {
+                foreach ($files as $file) {
+                    if ($file instanceof UploadedFile) {
+                        $client = $client->attach(
+                            'files',
+                            file_get_contents($file->getRealPath()),
+                            $file->getClientOriginalName(),
+                            ['Content-Type' => $file->getMimeType() ?: 'application/octet-stream']
+                        );
+                    }
+                }
+            }
+
+            foreach ($request->except(['files']) as $key => $value) {
+                if (is_array($value)) {
+                    foreach ($value as $item) {
+                        $client = $client->attach($key, (string) $item, null, ['Content-Type' => 'text/plain']);
+                    }
+                    continue;
+                }
+
+                $client = $client->attach($key, (string) $value, null, ['Content-Type' => 'text/plain']);
+            }
+
+            $upstream = $client->post($targetUrl);
+
+            $headers = [
                 'Content-Type' => $upstream->header('Content-Type', 'application/pdf'),
             ];
 
-            $contentDisposition = $upstream->header('Content-Disposition');
-            if ($contentDisposition) {
-                $responseHeaders['Content-Disposition'] = $contentDisposition;
+            if ($upstream->header('Content-Disposition')) {
+                $headers['Content-Disposition'] = $upstream->header('Content-Disposition');
             }
 
-            return response($upstream->body(), $upstream->status(), $responseHeaders);
+            return response($upstream->body(), $upstream->status(), $headers);
         } catch (\Throwable $e) {
             Log::error('PDF proxy request failed', [
                 'endpoint' => $endpoint,
-                'exception' => class_basename($e),
-                'code' => $e->getCode(),
+                'target_url' => $targetUrl,
+                'message' => $e->getMessage(),
             ]);
 
             return response()->json([
                 'success' => false,
                 'message' => 'PDF proxy request failed.',
-                'data' => config('app.debug') ? [
-                    'endpoint' => $endpoint,
-                    'exception' => class_basename($e),
-                ] : null,
+                'data' => config('app.debug') ? $e->getMessage() : null,
             ], 502);
         }
     }
