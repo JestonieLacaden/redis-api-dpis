@@ -27,6 +27,18 @@ class PdfProxyController extends Controller
 
     public function chromiumConvertHtml(Request $request): Response
     {
+        $contentType = (string) $request->header('Content-Type', '');
+        $rawBody = $request->getContent();
+
+        // Preserve the exact multipart payload coming from DPIS raw curl requests.
+        if ($rawBody !== '' && str_contains(strtolower($contentType), 'multipart/form-data')) {
+            return $this->forwardRawMultipartRequest(
+                '/forms/chromium/convert/html',
+                $rawBody,
+                $contentType
+            );
+        }
+
         $validated = $request->validate([
             'files' => ['required'],
             'files.*' => ['file', 'max:102400'],
@@ -80,6 +92,58 @@ class PdfProxyController extends Controller
             $validated,
             false
         );
+    }
+
+    protected function forwardRawMultipartRequest(
+        string $endpoint,
+        string $rawBody,
+        string $contentType
+    ): Response {
+        try {
+            $headers = [
+                'Content-Type' => $contentType,
+                'Accept' => 'application/pdf',
+            ];
+
+            $internalApiKey = (string) config('services.gotenberg.key');
+            if ($internalApiKey !== '') {
+                $headers['X-Api-Key'] = $internalApiKey;
+            }
+
+            $response = Http::withHeaders($headers)
+                ->withBody($rawBody, $contentType)
+                ->timeout(180)
+                ->post($this->targetUrl($endpoint));
+
+            if (!$response->successful()) {
+                Log::warning('PDF upstream raw request failed', [
+                    'endpoint' => $endpoint,
+                    'status' => $response->status(),
+                    'body_preview' => mb_substr($response->body(), 0, 500),
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'PDF conversion failed. Please try again later.',
+                    'data' => null,
+                ], 502);
+            }
+
+            return response($response->body(), 200, [
+                'Content-Type' => $response->header('Content-Type', 'application/pdf'),
+            ]);
+        } catch (\Throwable $e) {
+            Log::error('PDF proxy raw request error', [
+                'endpoint' => $endpoint,
+                'message' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Unable to connect to the PDF service. Please try again later.',
+                'data' => null,
+            ], 502);
+        }
     }
 
     protected function forwardMultipartRequest(
