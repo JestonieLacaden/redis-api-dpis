@@ -27,17 +27,6 @@ class PdfProxyController extends Controller
 
     public function chromiumConvertHtml(Request $request): Response
     {
-        $contentType = (string) $request->header('Content-Type', '');
-        $rawBody = $request->getContent();
-
-        if ($rawBody !== '' && str_contains(strtolower($contentType), 'multipart/form-data')) {
-            return $this->forwardRawMultipartRequest(
-                '/forms/chromium/convert/html',
-                $rawBody,
-                $contentType
-            );
-        }
-
         $validated = $request->validate([
             'files' => ['required'],
             'files.*' => ['file', 'max:102400'],
@@ -93,68 +82,6 @@ class PdfProxyController extends Controller
         );
     }
 
-    protected function forwardRawMultipartRequest(
-        string $endpoint,
-        string $rawBody,
-        string $contentType
-    ): Response {
-        $targetUrl = $this->targetUrl($endpoint);
-
-        $headers = [
-            'Content-Type: ' . $contentType,
-            'Accept: application/pdf',
-            'Content-Length: ' . strlen($rawBody),
-        ];
-
-        $internalApiKey = (string) config('services.gotenberg.key');
-        if ($internalApiKey !== '') {
-            $headers[] = 'X-Api-Key: ' . $internalApiKey;
-        }
-
-        $ch = curl_init($targetUrl);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 180);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, $rawBody);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-
-        $result = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-
-        if ($error) {
-            Log::error('PDF proxy raw request error', [
-                'endpoint' => $endpoint,
-                'message' => $error,
-            ]);
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Unable to connect to the PDF service. Please try again later.',
-                'data' => null,
-            ], 502);
-        }
-
-        if ($httpCode !== 200) {
-            Log::warning('PDF upstream raw request failed', [
-                'endpoint' => $endpoint,
-                'status' => $httpCode,
-                'body_preview' => mb_substr((string) $result, 0, 500),
-            ]);
-
-            return response()->json([
-                'success' => false,
-                'message' => 'PDF conversion failed. Please try again later.',
-                'data' => null,
-            ], 502);
-        }
-
-        return response($result, 200, [
-            'Content-Type' => 'application/pdf',
-        ]);
-    }
-
     protected function forwardMultipartRequest(
         Request $request,
         string $endpoint,
@@ -162,47 +89,45 @@ class PdfProxyController extends Controller
         bool $normalizeHtmlFiles = false
     ): Response {
         try {
-            $client = Http::timeout(180)->accept('application/pdf');
-
-            $internalApiKey = (string) config('services.gotenberg.key');
-            if ($internalApiKey !== '') {
-                $client = $client->withHeaders([
-                    'X-Api-Key' => $internalApiKey,
-                ]);
-            }
-
+            $multipart = [];
             $indexAssigned = false;
 
             foreach ($this->extractFiles($request) as $file) {
-                $filename = $this->resolveFilename($file, $normalizeHtmlFiles, $indexAssigned);
-                $contents = file_get_contents($file->getRealPath());
-
-                if ($contents === false) {
-                    throw new \RuntimeException('Failed to read uploaded file contents.');
-                }
-
-                $client = $client->attach(
-                    'files',
-                    $contents,
-                    $filename,
-                    ['Content-Type' => $file->getMimeType() ?: 'application/octet-stream']
-                );
+                $multipart[] = [
+                    'name' => 'files',
+                    'contents' => fopen($file->getRealPath(), 'r'),
+                    'filename' => $this->resolveFilename($file, $normalizeHtmlFiles, $indexAssigned),
+                    'headers' => [
+                        'Content-Type' => $file->getMimeType() ?: 'application/octet-stream',
+                    ],
+                ];
             }
 
             foreach ($this->extractTextFields($validated) as $key => $value) {
                 $values = is_array($value) ? $value : [$value];
 
                 foreach ($values as $item) {
-                    $client = $client->attach(
-                        $key,
-                        $this->normalizeScalarValue($item),
-                        '',
-                        ['Content-Type' => 'text/plain']
-                    );
+                    $multipart[] = [
+                        'name' => $key,
+                        'contents' => $this->normalizeScalarValue($item),
+                    ];
                 }
             }
 
-            $response = $client->post($this->targetUrl($endpoint));
+            $headers = [
+                'Accept' => 'application/pdf',
+            ];
+
+            $internalApiKey = (string) config('services.gotenberg.key');
+            if ($internalApiKey !== '') {
+                $headers['X-Api-Key'] = $internalApiKey;
+            }
+
+            $response = Http::withHeaders($headers)
+                ->timeout(180)
+                ->send('POST', $this->targetUrl($endpoint), [
+                    'multipart' => $multipart,
+                ]);
 
             if (!$response->successful()) {
                 Log::warning('PDF upstream request failed', [
