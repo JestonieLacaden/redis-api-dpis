@@ -12,94 +12,146 @@ class PdfProxyController extends Controller
 {
     public function libreofficeConvert(Request $request): Response
     {
-        return $this->forwardMultipart($request, '/forms/libreoffice/convert');
+        $validated = $request->validate([
+            'files' => ['required'],
+            'files.*' => ['file', 'max:51200'],
+        ]);
+
+        return $this->forwardMultipartRequest(
+            $request,
+            '/forms/libreoffice/convert',
+            $validated
+        );
     }
 
     public function chromiumConvertHtml(Request $request): Response
     {
-        return $this->forwardMultipart($request, '/forms/chromium/convert/html');
+        $validated = $request->validate([
+            'files' => ['required'],
+            'files.*' => ['file', 'max:51200'],
+        ]);
+
+        return $this->forwardMultipartRequest(
+            $request,
+            '/forms/chromium/convert/html',
+            $validated
+        );
     }
 
     public function chromiumConvertUrl(Request $request): Response
     {
-        return $this->forwardMultipart($request, '/forms/chromium/convert/url');
+        $validated = $request->validate([
+            'url' => ['required', 'url', 'max:2048'],
+        ]);
+
+        return $this->forwardMultipartRequest(
+            $request,
+            '/forms/chromium/convert/url',
+            $validated
+        );
     }
 
-    protected function forwardMultipart(Request $request, string $endpoint): Response
+    protected function forwardMultipartRequest(Request $request, string $endpoint, array $validated): Response
     {
-        $baseUrl = rtrim((string) config('services.gotenberg.url'), '/');
-        $targetUrl = $baseUrl . $endpoint;
-
-        if (!$request->hasFile('files') && !$request->filled('url')) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Missing required multipart fields.',
-                'data' => null,
-            ], 422);
-        }
-
         try {
             $client = Http::timeout(180)->accept('application/pdf');
 
-            $internalApiKey = config('services.gotenberg.key');
-            if (!empty($internalApiKey)) {
+            $internalApiKey = (string) config('services.gotenberg.key');
+            if ($internalApiKey !== '') {
                 $client = $client->withHeaders([
                     'X-Api-Key' => $internalApiKey,
                 ]);
             }
 
-            $files = $request->file('files');
-            if ($files instanceof UploadedFile) {
-                $files = [$files];
+            foreach ($this->extractFiles($request) as $file) {
+                $client = $client->attach(
+                    'files',
+                    file_get_contents($file->getRealPath()),
+                    $file->getClientOriginalName(),
+                    ['Content-Type' => $file->getMimeType() ?: 'application/octet-stream']
+                );
             }
 
-            if (is_array($files)) {
-                foreach ($files as $file) {
-                    if ($file instanceof UploadedFile) {
-                        $client = $client->attach(
-                            'files',
-                            file_get_contents($file->getRealPath()),
-                            $file->getClientOriginalName(),
-                            ['Content-Type' => $file->getMimeType() ?: 'application/octet-stream']
-                        );
-                    }
+            foreach ($this->extractTextFields($validated) as $key => $value) {
+                $values = is_array($value) ? $value : [$value];
+
+                foreach ($values as $item) {
+                    $client = $client->attach(
+                        $key,
+                        (string) $item,
+                        null,
+                        ['Content-Type' => 'text/plain']
+                    );
                 }
             }
 
-            foreach ($request->except(['files']) as $key => $value) {
-                if (is_array($value)) {
-                    foreach ($value as $item) {
-                        $client = $client->attach($key, (string) $item, null, ['Content-Type' => 'text/plain']);
-                    }
-                    continue;
-                }
+            $response = $client->post($this->targetUrl($endpoint));
 
-                $client = $client->attach($key, (string) $value, null, ['Content-Type' => 'text/plain']);
+            if (!$response->successful()) {
+                Log::warning('PDF upstream request failed', [
+                    'endpoint' => $endpoint,
+                    'status' => $response->status(),
+                    'body_preview' => mb_substr($response->body(), 0, 500),
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'PDF conversion failed. Please try again later.',
+                    'data' => null,
+                ], 502);
             }
-
-            $upstream = $client->post($targetUrl);
 
             $headers = [
-                'Content-Type' => $upstream->header('Content-Type', 'application/pdf'),
+                'Content-Type' => $response->header('Content-Type', 'application/pdf'),
             ];
 
-            if ($upstream->header('Content-Disposition')) {
-                $headers['Content-Disposition'] = $upstream->header('Content-Disposition');
+            $contentDisposition = $response->header('Content-Disposition');
+            if ($contentDisposition) {
+                $headers['Content-Disposition'] = $contentDisposition;
             }
 
-            return response($upstream->body(), $upstream->status(), $headers);
+            return response($response->body(), 200, $headers);
         } catch (\Throwable $e) {
-            Log::error('PDF proxy request failed', [
+            Log::error('PDF proxy request error', [
                 'endpoint' => $endpoint,
-                'target_url' => $targetUrl,
                 'message' => $e->getMessage(),
             ]);
 
             return response()->json([
                 'success' => false,
-                'message' => 'PDF proxy request failed.',
-                'data' => config('app.debug') ? $e->getMessage() : null,
+                'message' => 'Unable to connect to the PDF service. Please try again later.',
+                'data' => null,
             ], 502);
         }
+    }
+
+    /**
+     * @return UploadedFile[]
+     */
+    protected function extractFiles(Request $request): array
+    {
+        $files = $request->file('files');
+
+        if ($files instanceof UploadedFile) {
+            return [$files];
+        }
+
+        if (is_array($files)) {
+            return array_values(array_filter($files, fn ($file) => $file instanceof UploadedFile));
+        }
+
+        return [];
+    }
+
+    protected function extractTextFields(array $validated): array
+    {
+        unset($validated['files']);
+
+        return $validated;
+    }
+
+    protected function targetUrl(string $endpoint): string
+    {
+        return rtrim((string) config('services.gotenberg.url'), '/') . $endpoint;
     }
 }
