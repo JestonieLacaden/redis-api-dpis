@@ -20,7 +20,8 @@ class PdfProxyController extends Controller
         return $this->forwardMultipartRequest(
             $request,
             '/forms/libreoffice/convert',
-            $validated
+            $validated,
+            false
         );
     }
 
@@ -29,12 +30,27 @@ class PdfProxyController extends Controller
         $validated = $request->validate([
             'files' => ['required'],
             'files.*' => ['file', 'max:51200'],
+            'paperWidth' => ['nullable', 'numeric'],
+            'paperHeight' => ['nullable', 'numeric'],
+            'marginTop' => ['nullable', 'numeric'],
+            'marginBottom' => ['nullable', 'numeric'],
+            'marginLeft' => ['nullable', 'numeric'],
+            'marginRight' => ['nullable', 'numeric'],
+            'scale' => ['nullable', 'numeric'],
+            'printBackground' => ['nullable'],
+            'landscape' => ['nullable'],
+            'nativePageRanges' => ['nullable', 'string'],
+            'preferCssPageSize' => ['nullable'],
+            'generateDocumentOutline' => ['nullable'],
+            'generateTaggedPdf' => ['nullable'],
+            'singlePage' => ['nullable'],
         ]);
 
         return $this->forwardMultipartRequest(
             $request,
             '/forms/chromium/convert/html',
-            $validated
+            $validated,
+            true
         );
     }
 
@@ -42,17 +58,36 @@ class PdfProxyController extends Controller
     {
         $validated = $request->validate([
             'url' => ['required', 'url', 'max:2048'],
+            'paperWidth' => ['nullable', 'numeric'],
+            'paperHeight' => ['nullable', 'numeric'],
+            'marginTop' => ['nullable', 'numeric'],
+            'marginBottom' => ['nullable', 'numeric'],
+            'marginLeft' => ['nullable', 'numeric'],
+            'marginRight' => ['nullable', 'numeric'],
+            'scale' => ['nullable', 'numeric'],
+            'printBackground' => ['nullable'],
+            'landscape' => ['nullable'],
+            'nativePageRanges' => ['nullable', 'string'],
+            'preferCssPageSize' => ['nullable'],
+            'generateDocumentOutline' => ['nullable'],
+            'generateTaggedPdf' => ['nullable'],
+            'singlePage' => ['nullable'],
         ]);
 
         return $this->forwardMultipartRequest(
             $request,
             '/forms/chromium/convert/url',
-            $validated
+            $validated,
+            false
         );
     }
 
-    protected function forwardMultipartRequest(Request $request, string $endpoint, array $validated): Response
-    {
+    protected function forwardMultipartRequest(
+        Request $request,
+        string $endpoint,
+        array $validated,
+        bool $forceIndexHtml = false
+    ): Response {
         try {
             $client = Http::timeout(180)->accept('application/pdf');
 
@@ -63,11 +98,19 @@ class PdfProxyController extends Controller
                 ]);
             }
 
-            foreach ($this->extractFiles($request) as $file) {
+            $files = $this->extractFiles($request);
+
+            foreach ($files as $index => $file) {
+                $filename = $file->getClientOriginalName();
+
+                if ($forceIndexHtml && $index === 0) {
+                    $filename = 'index.html';
+                }
+
                 $client = $client->attach(
                     'files',
                     file_get_contents($file->getRealPath()),
-                    $file->getClientOriginalName(),
+                    $filename,
                     ['Content-Type' => $file->getMimeType() ?: 'application/octet-stream']
                 );
             }
@@ -78,7 +121,7 @@ class PdfProxyController extends Controller
                 foreach ($values as $item) {
                     $client = $client->attach(
                         $key,
-                        (string) $item,
+                        $this->normalizeScalarValue($item),
                         null,
                         ['Content-Type' => 'text/plain']
                     );
@@ -148,6 +191,15 @@ class PdfProxyController extends Controller
         unset($validated['files']);
 
         return $validated;
+    }
+
+    protected function normalizeScalarValue($value): string
+    {
+        if (is_bool($value)) {
+            return $value ? 'true' : 'false';
+        }
+
+        return (string) $value;
     }
 
     protected function targetUrl(string $endpoint): string
