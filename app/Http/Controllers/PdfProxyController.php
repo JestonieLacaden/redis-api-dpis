@@ -14,7 +14,7 @@ class PdfProxyController extends Controller
     {
         $validated = $request->validate([
             'files' => ['required'],
-            'files.*' => ['file', 'max:51200'],
+            'files.*' => ['file', 'max:102400'],
         ]);
 
         return $this->forwardMultipartRequest(
@@ -29,7 +29,7 @@ class PdfProxyController extends Controller
     {
         $validated = $request->validate([
             'files' => ['required'],
-            'files.*' => ['file', 'max:51200'],
+            'files.*' => ['file', 'max:102400'],
             'paperWidth' => ['nullable', 'numeric'],
             'paperHeight' => ['nullable', 'numeric'],
             'marginTop' => ['nullable', 'numeric'],
@@ -86,7 +86,7 @@ class PdfProxyController extends Controller
         Request $request,
         string $endpoint,
         array $validated,
-        bool $forceIndexHtml = false
+        bool $normalizeHtmlFiles = false
     ): Response {
         try {
             $client = Http::timeout(180)->accept('application/pdf');
@@ -98,14 +98,10 @@ class PdfProxyController extends Controller
                 ]);
             }
 
-            $files = $this->extractFiles($request);
+            $indexAssigned = false;
 
-            foreach ($files as $index => $file) {
-                $filename = $file->getClientOriginalName();
-
-                if ($forceIndexHtml && $index === 0) {
-                    $filename = 'index.html';
-                }
+            foreach ($this->extractFiles($request) as $file) {
+                $filename = $this->resolveFilename($file, $normalizeHtmlFiles, $indexAssigned);
 
                 $client = $client->attach(
                     'files',
@@ -144,16 +140,9 @@ class PdfProxyController extends Controller
                 ], 502);
             }
 
-            $headers = [
+            return response($response->body(), 200, [
                 'Content-Type' => $response->header('Content-Type', 'application/pdf'),
-            ];
-
-            $contentDisposition = $response->header('Content-Disposition');
-            if ($contentDisposition) {
-                $headers['Content-Disposition'] = $contentDisposition;
-            }
-
-            return response($response->body(), 200, $headers);
+            ]);
         } catch (\Throwable $e) {
             Log::error('PDF proxy request error', [
                 'endpoint' => $endpoint,
@@ -200,6 +189,34 @@ class PdfProxyController extends Controller
         }
 
         return (string) $value;
+    }
+
+    protected function resolveFilename(
+        UploadedFile $file,
+        bool $normalizeHtmlFiles,
+        bool &$indexAssigned
+    ): string {
+        $originalName = $file->getClientOriginalName();
+        $lowerName = strtolower($originalName);
+
+        if (!$normalizeHtmlFiles) {
+            return $originalName;
+        }
+
+        if ($lowerName === 'header.html') {
+            return 'header.html';
+        }
+
+        if ($lowerName === 'footer.html') {
+            return 'footer.html';
+        }
+
+        if (!$indexAssigned && str_ends_with($lowerName, '.html')) {
+            $indexAssigned = true;
+            return 'index.html';
+        }
+
+        return $originalName;
     }
 
     protected function targetUrl(string $endpoint): string
