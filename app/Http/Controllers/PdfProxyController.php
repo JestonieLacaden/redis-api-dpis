@@ -30,7 +30,6 @@ class PdfProxyController extends Controller
         $contentType = (string) $request->header('Content-Type', '');
         $rawBody = $request->getContent();
 
-        // Preserve the exact multipart payload coming from DPIS raw curl requests.
         if ($rawBody !== '' && str_contains(strtolower($contentType), 'multipart/form-data')) {
             return $this->forwardRawMultipartRequest(
                 '/forms/chromium/convert/html',
@@ -99,43 +98,35 @@ class PdfProxyController extends Controller
         string $rawBody,
         string $contentType
     ): Response {
-        try {
-            $headers = [
-                'Content-Type' => $contentType,
-                'Accept' => 'application/pdf',
-            ];
+        $targetUrl = $this->targetUrl($endpoint);
 
-            $internalApiKey = (string) config('services.gotenberg.key');
-            if ($internalApiKey !== '') {
-                $headers['X-Api-Key'] = $internalApiKey;
-            }
+        $headers = [
+            'Content-Type: ' . $contentType,
+            'Accept: application/pdf',
+            'Content-Length: ' . strlen($rawBody),
+        ];
 
-            $response = Http::withHeaders($headers)
-                ->withBody($rawBody, $contentType)
-                ->timeout(180)
-                ->post($this->targetUrl($endpoint));
+        $internalApiKey = (string) config('services.gotenberg.key');
+        if ($internalApiKey !== '') {
+            $headers[] = 'X-Api-Key: ' . $internalApiKey;
+        }
 
-            if (!$response->successful()) {
-                Log::warning('PDF upstream raw request failed', [
-                    'endpoint' => $endpoint,
-                    'status' => $response->status(),
-                    'body_preview' => mb_substr($response->body(), 0, 500),
-                ]);
+        $ch = curl_init($targetUrl);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 180);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $rawBody);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
 
-                return response()->json([
-                    'success' => false,
-                    'message' => 'PDF conversion failed. Please try again later.',
-                    'data' => null,
-                ], 502);
-            }
+        $result = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        curl_close($ch);
 
-            return response($response->body(), 200, [
-                'Content-Type' => $response->header('Content-Type', 'application/pdf'),
-            ]);
-        } catch (\Throwable $e) {
+        if ($error) {
             Log::error('PDF proxy raw request error', [
                 'endpoint' => $endpoint,
-                'message' => $e->getMessage(),
+                'message' => $error,
             ]);
 
             return response()->json([
@@ -144,6 +135,24 @@ class PdfProxyController extends Controller
                 'data' => null,
             ], 502);
         }
+
+        if ($httpCode !== 200) {
+            Log::warning('PDF upstream raw request failed', [
+                'endpoint' => $endpoint,
+                'status' => $httpCode,
+                'body_preview' => mb_substr((string) $result, 0, 500),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'PDF conversion failed. Please try again later.',
+                'data' => null,
+            ], 502);
+        }
+
+        return response($result, 200, [
+            'Content-Type' => 'application/pdf',
+        ]);
     }
 
     protected function forwardMultipartRequest(
@@ -166,10 +175,15 @@ class PdfProxyController extends Controller
 
             foreach ($this->extractFiles($request) as $file) {
                 $filename = $this->resolveFilename($file, $normalizeHtmlFiles, $indexAssigned);
+                $contents = file_get_contents($file->getRealPath());
+
+                if ($contents === false) {
+                    throw new \RuntimeException('Failed to read uploaded file contents.');
+                }
 
                 $client = $client->attach(
                     'files',
-                    file_get_contents($file->getRealPath()),
+                    $contents,
                     $filename,
                     ['Content-Type' => $file->getMimeType() ?: 'application/octet-stream']
                 );
@@ -182,7 +196,7 @@ class PdfProxyController extends Controller
                     $client = $client->attach(
                         $key,
                         $this->normalizeScalarValue($item),
-                        null,
+                        '',
                         ['Content-Type' => 'text/plain']
                     );
                 }
@@ -252,6 +266,10 @@ class PdfProxyController extends Controller
             return $value ? 'true' : 'false';
         }
 
+        if ($value === null) {
+            return '';
+        }
+
         return (string) $value;
     }
 
@@ -265,6 +283,11 @@ class PdfProxyController extends Controller
 
         if (!$normalizeHtmlFiles) {
             return $originalName;
+        }
+
+        if ($lowerName === 'index.html') {
+            $indexAssigned = true;
+            return 'index.html';
         }
 
         if ($lowerName === 'header.html') {
