@@ -27,90 +27,32 @@ class PdfProxyController extends Controller
 
     public function chromiumConvertHtml(Request $request): Response
     {
-        $contentType = (string) $request->header('Content-Type', '');
-        $rawBody = $request->getContent();
+        $validated = $request->validate([
+            'files' => ['required'],
+            'files.*' => ['file', 'max:102400'],
+            'paperWidth' => ['nullable', 'numeric'],
+            'paperHeight' => ['nullable', 'numeric'],
+            'marginTop' => ['nullable', 'numeric'],
+            'marginBottom' => ['nullable', 'numeric'],
+            'marginLeft' => ['nullable', 'numeric'],
+            'marginRight' => ['nullable', 'numeric'],
+            'scale' => ['nullable', 'numeric'],
+            'printBackground' => ['nullable'],
+            'landscape' => ['nullable'],
+            'nativePageRanges' => ['nullable', 'string'],
+            'preferCssPageSize' => ['nullable'],
+            'generateDocumentOutline' => ['nullable'],
+            'generateTaggedPdf' => ['nullable'],
+            'singlePage' => ['nullable'],
+        ]);
 
-        if ($rawBody === '' || !str_contains(strtolower($contentType), 'multipart/form-data')) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid multipart request body.',
-                'data' => null,
-            ], 422);
-        }
-
-        return $this->forwardRawMultipartRequest(
+        return $this->forwardMultipartRequest(
+            $request,
             '/forms/chromium/convert/html',
-            $rawBody,
-            $contentType
+            $validated,
+            true
         );
     }
-
-    protected function forwardRawMultipartRequest(
-        string $endpoint,
-        string $rawBody,
-        string $contentType
-    ): Response {
-        try {
-            $headers = [
-                'Content-Type: ' . $contentType,
-                'Accept: application/pdf',
-                'Content-Length: ' . strlen($rawBody),
-            ];
-
-            $internalApiKey = (string) config('services.gotenberg.key');
-            if ($internalApiKey !== '') {
-                $headers[] = 'X-Api-Key: ' . $internalApiKey;
-            }
-
-            $ch = curl_init($this->targetUrl($endpoint));
-            curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_TIMEOUT, 180);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, $rawBody);
-            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-
-            $result = curl_exec($ch);
-            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $error = curl_error($ch);
-
-            curl_close($ch);
-
-            if ($error) {
-                throw new \RuntimeException($error);
-            }
-
-            if ($httpCode !== 200) {
-                Log::warning('PDF upstream raw request failed', [
-                    'endpoint' => $endpoint,
-                    'status' => $httpCode,
-                    'body_preview' => mb_substr((string) $result, 0, 500),
-                ]);
-
-                return response()->json([
-                    'success' => false,
-                    'message' => 'PDF conversion failed. Please try again later.',
-                    'data' => null,
-                ], 502);
-            }
-
-            return response($result, 200, [
-                'Content-Type' => 'application/pdf',
-            ]);
-        } catch (\Throwable $e) {
-            Log::error('PDF proxy raw request error', [
-                'endpoint' => $endpoint,
-                'message' => $e->getMessage(),
-            ]);
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Unable to connect to the PDF service. Please try again later.',
-                'data' => null,
-            ], 502);
-        }
-    }
-
-
 
     public function chromiumConvertUrl(Request $request): Response
     {
@@ -151,9 +93,15 @@ class PdfProxyController extends Controller
             $indexAssigned = false;
 
             foreach ($this->extractFiles($request) as $file) {
+                $stream = fopen($file->getRealPath(), 'r');
+
+                if ($stream === false) {
+                    throw new \RuntimeException('Failed to open uploaded file stream.');
+                }
+
                 $multipart[] = [
                     'name' => 'files',
-                    'contents' => fopen($file->getRealPath(), 'r'),
+                    'contents' => $stream,
                     'filename' => $this->resolveFilename($file, $normalizeHtmlFiles, $indexAssigned),
                     'headers' => [
                         'Content-Type' => $file->getMimeType() ?: 'application/octet-stream',
