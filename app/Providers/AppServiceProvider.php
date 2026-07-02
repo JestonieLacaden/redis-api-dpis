@@ -26,7 +26,7 @@ class AppServiceProvider extends ServiceProvider
         });
 
         RateLimiter::for('pdf-api', function ($request) {
-        return Limit::perMinute(20)->by($request->ip());
+        return Limit::perMinute(120)->by($request->ip());
     });
     }
 }
